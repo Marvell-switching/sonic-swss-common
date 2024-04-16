@@ -446,6 +446,9 @@ namespace swss {
 
 #define CFG_SAG_TABLE_NAME                          "SAG"
 
+#define CFG_TIME_RANGE_TABLE_NAME                   "TIME_RANGE"
+#define CFG_SCHEDULED_CONFIGURATION_TABLE_NAME      "SCHEDULED_CONFIGURATIONS"
+
 /***** STATE DATABASE *****/
 
 #define STATE_SWITCH_CAPABILITY_TABLE_NAME          "SWITCH_CAPABILITY"
@@ -528,6 +531,8 @@ namespace swss {
 /***** Counter capability tables for Queue and Port ****/
 #define STATE_QUEUE_COUNTER_CAPABILITIES_NAME   "QUEUE_COUNTER_CAPABILITIES"
 #define STATE_PORT_COUNTER_CAPABILITIES_NAME    "PORT_COUNTER_CAPABILITIES"
+
+#define STATE_TIME_RANGE_STATUS_TABLE_NAME       "TIME_RANGE_STATUS_TABLE"
 
 /***** PROFILE DATABASE *****/
 
