@@ -18,6 +18,15 @@ using json = nlohmann::json;
 using namespace std;
 using namespace swss;
 
+std::mutex DBConnector::r_mutex;  // Define static mutex
+bool DBConnector::r_protected = false; // Define static protected flag
+
+#define R_SAFE() \
+    std::unique_lock<std::mutex> lock(r_mutex, std::defer_lock); \
+    if ( r_protected ) \
+    { \
+        lock.lock(); \
+    } 
 
 void SonicDBConfig::parseDatabaseConfig(const string &file,
                     std::map<std::string, RedisInstInfo> &inst_entry,
@@ -535,7 +544,8 @@ RedisContext::RedisContext()
 {
 }
 
-RedisContext::RedisContext(const RedisContext &other)
+RedisContext::RedisContext(const RedisContext &other, bool isProtected)
+    : r_protected(isProtected)
 {
     auto octx = other.getContext();
     const char *unixPath = octx->unix_sock.path;
@@ -595,7 +605,7 @@ void RedisContext::setClientName(const string& clientName)
 {
     string command("CLIENT SETNAME ");
     command += clientName;
-
+    R_SAFE();
     RedisReply r(this, command, REDIS_REPLY_STATUS);
     r.checkStatusOK();
 }
@@ -603,7 +613,7 @@ void RedisContext::setClientName(const string& clientName)
 string RedisContext::getClientName()
 {
     string command("CLIENT GETNAME");
-
+    R_SAFE();
     RedisReply r(this, command);
 
     auto ctx = r.getContext();
@@ -624,7 +634,7 @@ void DBConnector::select(DBConnector *db)
 {
     string select("SELECT ");
     select += to_string(db->getDbId());
-
+    R_SAFE();
     RedisReply r(db, select, REDIS_REPLY_STATUS);
     r.checkStatusOK();
 }
@@ -638,10 +648,11 @@ DBConnector::DBConnector(const DBConnector &other)
     select(this);
 }
 
-DBConnector::DBConnector(int dbId, const RedisContext& ctx)
-    : RedisContext(ctx)
+DBConnector::DBConnector(int dbId, const RedisContext& ctx, bool isProtected)
+    : RedisContext(ctx, isProtected)
     , m_dbId(dbId)
 {
+    r_protected = isProtected;
     select(this);
 }
 
@@ -755,6 +766,7 @@ int64_t DBConnector::del(const string &key)
 {
     RedisCommand sdel;
     sdel.format("DEL %s", key.c_str());
+    R_SAFE();
     RedisReply r(this, sdel, REDIS_REPLY_INTEGER);
     return r.getContext()->integer;
 }
@@ -768,6 +780,7 @@ bool DBConnector::exists(const string &key)
         throw runtime_error("EXISTS failed, invalid space or tab in single key");
     }
     rexists.format("EXISTS %s", key.c_str());
+    R_SAFE();
     RedisReply r(this, rexists, REDIS_REPLY_INTEGER);
     return r.getContext()->integer > 0;
 }
@@ -784,6 +797,7 @@ int64_t DBConnector::hdel(const std::string &key, const std::vector<std::string>
 {
     RedisCommand shdel;
     shdel.formatHDEL(key, fields);
+    R_SAFE();
     RedisReply r(this, shdel, REDIS_REPLY_INTEGER);
     return r.getContext()->integer;
 }
@@ -792,6 +806,7 @@ void DBConnector::hset(const string &key, const string &field, const string &val
 {
     RedisCommand shset;
     shset.format("HSET %s %s %s", key.c_str(), field.c_str(), value.c_str());
+    R_SAFE();
     RedisReply r(this, shset, REDIS_REPLY_INTEGER);
 }
 
@@ -799,6 +814,7 @@ bool DBConnector::set(const string &key, const string &value)
 {
     RedisCommand sset;
     sset.format("SET %s %s", key.c_str(), value.c_str());
+    R_SAFE();
     RedisReply r(this, sset, REDIS_REPLY_STATUS);
     string s = r.getReply<string>();
     return s == "OK";
@@ -813,6 +829,7 @@ void DBConnector::config_set(const std::string &key, const std::string &value)
 {
     RedisCommand sset;
     sset.format("CONFIG SET %s %s", key.c_str(), value.c_str());
+    R_SAFE();
     RedisReply r(this, sset, REDIS_REPLY_STATUS);
 }
 
@@ -820,6 +837,7 @@ bool DBConnector::flushdb()
 {
     RedisCommand sflushdb;
     sflushdb.format("FLUSHDB");
+    R_SAFE();
     RedisReply r(this, sflushdb, REDIS_REPLY_STATUS);
     string s = r.getReply<string>();
     return s == "OK";
@@ -829,6 +847,7 @@ vector<string> DBConnector::keys(const string &key)
 {
     RedisCommand skeys;
     skeys.format("KEYS %s", key.c_str());
+    R_SAFE();
     RedisReply r(this, skeys, REDIS_REPLY_ARRAY);
 
     auto ctx = r.getContext();
@@ -844,6 +863,7 @@ pair<int, vector<string>> DBConnector::scan(int cursor, const char *match, uint3
 {
     RedisCommand sscan;
     sscan.format("SCAN %d MATCH %s COUNT %u", cursor, match, count);
+    R_SAFE();
     RedisReply r(this, sscan, REDIS_REPLY_ARRAY);
 
     RedisReply r0(r.releaseChild(0));
@@ -873,6 +893,7 @@ int64_t DBConnector::incr(const string &key)
 {
     RedisCommand sincr;
     sincr.format("INCR %s", key.c_str());
+    R_SAFE();
     RedisReply r(this, sincr, REDIS_REPLY_INTEGER);
     return r.getContext()->integer;
 }
@@ -881,6 +902,7 @@ int64_t DBConnector::decr(const string &key)
 {
     RedisCommand sdecr;
     sdecr.format("DECR %s", key.c_str());
+    R_SAFE();
     RedisReply r(this, sdecr, REDIS_REPLY_INTEGER);
     return r.getContext()->integer;
 }
@@ -889,6 +911,7 @@ shared_ptr<string> DBConnector::get(const string &key)
 {
     RedisCommand sget;
     sget.format("GET %s", key.c_str());
+    R_SAFE();
     RedisReply r(this, sget);
     auto reply = r.getContext();
 
@@ -910,6 +933,7 @@ shared_ptr<string> DBConnector::hget(const string &key, const string &field)
 {
     RedisCommand shget;
     shget.format("HGET %s %s", key.c_str(), field.c_str());
+    R_SAFE();
     RedisReply r(this, shget);
     auto reply = r.getContext();
 
@@ -932,6 +956,7 @@ bool DBConnector::hexists(const string &key, const string &field)
 {
     RedisCommand rexists;
     rexists.format("HEXISTS %s %s", key.c_str(), field.c_str());
+    R_SAFE();
     RedisReply r(this, rexists, REDIS_REPLY_INTEGER);
     return r.getContext()->integer > 0;
 }
@@ -940,6 +965,7 @@ int64_t DBConnector::rpush(const string &list, const string &item)
 {
     RedisCommand srpush;
     srpush.format("RPUSH %s %s", list.c_str(), item.c_str());
+    R_SAFE();
     RedisReply r(this, srpush, REDIS_REPLY_INTEGER);
     return r.getContext()->integer;
 }
@@ -948,6 +974,7 @@ shared_ptr<string> DBConnector::blpop(const string &list, int timeout)
 {
     RedisCommand sblpop;
     sblpop.format("BLPOP %s %d", list.c_str(), timeout);
+    R_SAFE();
     RedisReply r(this, sblpop);
     auto reply = r.getContext();
 
@@ -969,6 +996,7 @@ void DBConnector::subscribe(const std::string &pattern)
 {
     std::string s("SUBSCRIBE ");
     s += pattern;
+    R_SAFE();
     RedisReply r(this, s, REDIS_REPLY_ARRAY);
 }
 
@@ -976,6 +1004,7 @@ void DBConnector::psubscribe(const std::string &pattern)
 {
     std::string s("PSUBSCRIBE ");
     s += pattern;
+    R_SAFE();
     RedisReply r(this, s, REDIS_REPLY_ARRAY);
 }
 
@@ -983,6 +1012,7 @@ void DBConnector::punsubscribe(const std::string &pattern)
 {
     std::string s("PUNSUBSCRIBE ");
     s += pattern;
+    R_SAFE();
     RedisReply r(this, s, REDIS_REPLY_ARRAY);
 }
 
@@ -990,6 +1020,7 @@ int64_t DBConnector::publish(const string &channel, const string &message)
 {
     RedisCommand publish;
     publish.format("PUBLISH %s %s", channel.c_str(), message.c_str());
+    R_SAFE();
     RedisReply r(this, publish, REDIS_REPLY_INTEGER);
     return r.getReply<long long int>();
 }
@@ -1046,3 +1077,180 @@ map<string, map<string, map<string, string>>> DBConnector::getall()
     }
     return data;
 }
+
+
+
+// shared_ptr<string> ProtectedDBConnector::get(const string &key)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::get");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::get(key);
+// }
+
+// shared_ptr<string> ProtectedDBConnector::blpop(const string &list, int timeout)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::blpop");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::blpop(list, timeout);
+// }
+
+
+// void ProtectedDBConnector::subscribe(const std::string &pattern)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::subscribe");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     DBConnector::subscribe(pattern);
+// }
+
+// void ProtectedDBConnector::psubscribe(const std::string &pattern)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::psubscribe");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     DBConnector::psubscribe(pattern);
+// }
+
+// void ProtectedDBConnector::punsubscribe(const std::string &pattern)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::punsubscribe");
+//     DBConnector::punsubscribe(pattern);
+// }
+
+// int64_t ProtectedDBConnector::publish(const string &channel, const string &message)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::publish");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::publish(channel, message);
+// }
+
+// void ProtectedDBConnector::hmset(const std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>& multiHash)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::hmset");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     DBConnector::hmset(multiHash);
+// }
+
+// void ProtectedDBConnector::del(const std::vector<std::string>& keys)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::del");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     DBConnector::del(keys);
+// }
+
+// map<string, map<string, map<string, string>>> ProtectedDBConnector::getall()
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::getall");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::getall();
+// }
+
+// shared_ptr<string> ProtectedDBConnector::hget(const string &key, const string &field)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::hget");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::hget(key, field);
+// }
+
+// bool ProtectedDBConnector::hexists(const string &key, const string &field)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::hexists");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::hexists(key, field);
+// }
+
+// int64_t ProtectedDBConnector::rpush(const string &list, const string &item)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::rpush");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::rpush(list, item);
+// }
+
+// int64_t ProtectedDBConnector::del(const string &key)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::del");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::del(key);
+// }
+
+// bool ProtectedDBConnector::exists(const string &key)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::exists");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::exists(key);
+// }
+
+// int64_t ProtectedDBConnector::hdel(const string &key, const string &field)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::hdel");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::hdel(key, field);
+// }
+
+// int64_t ProtectedDBConnector::hdel(const std::string &key, const std::vector<std::string> &fields)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::hdel");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::hdel(key, fields);
+// }
+
+// void ProtectedDBConnector::hset(const string &key, const string &field, const string &value)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::hset");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     DBConnector::hset(key, field, value);   
+// }
+
+// bool ProtectedDBConnector::set(const string &key, const string &value)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::set");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::set(key, value);
+// }
+
+// bool ProtectedDBConnector::set(const string &key, int value)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::set");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return set(key, to_string(value));
+// }
+
+// void ProtectedDBConnector::config_set(const std::string &key, const std::string &value)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::config_set");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::config_set(key, value);
+// }
+
+// bool ProtectedDBConnector::flushdb()
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::flushdb");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::flushdb();
+// }
+
+// vector<string> ProtectedDBConnector::keys(const string &key)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::keys");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::keys(key);   
+// }
+
+// pair<int, vector<string>> ProtectedDBConnector::scan(int cursor, const char *match, uint32_t count)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::scan");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::scan(cursor, match, count);
+// }
+
+// int64_t ProtectedDBConnector::incr(const string &key)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::incr");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::incr(key);
+// }
+
+// int64_t ProtectedDBConnector::decr(const string &key)
+// {
+//     // LogToModuleFile("1","ProtectedDBConnector::decr");
+//     std::unique_lock<std::mutex> lock(mtx);
+//     return DBConnector::decr(key);
+// }

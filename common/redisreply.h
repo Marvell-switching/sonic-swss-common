@@ -114,5 +114,7 @@ private:
     redisReply *m_reply;
 };
 
+
+
 }
 #endif

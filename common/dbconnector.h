@@ -174,7 +174,7 @@ public:
      * Timeout - The time in milisecond until exception is been thrown. For
      *           infinite wait, set this value to 0
      */
-    RedisContext(const RedisContext &other);
+    RedisContext(const RedisContext &other, bool isProtected = false);
     RedisContext& operator=(const RedisContext&) = delete;
 
     ~RedisContext();
@@ -197,6 +197,8 @@ protected:
 
 private:
     redisContext *m_conn;
+    bool r_protected = false;
+    std::mutex r_mutex;
 };
 
 class DBConnector : public RedisContext
@@ -212,7 +214,7 @@ public:
      *           infinite wait, set this value to 0
      */
     explicit DBConnector(const DBConnector &other);
-    DBConnector(int dbId, const RedisContext &ctx);
+    DBConnector(int dbId, const RedisContext &ctx, bool isProtected = false);
     DBConnector(int dbId, const std::string &hostname, int port, unsigned int timeout);
     DBConnector(int dbId, const std::string &unixPath, unsigned int timeout);
     DBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn = false);
@@ -318,6 +320,8 @@ private:
     int m_dbId;
     std::string m_dbName;
     SonicDBKey m_key;
+    static std::mutex r_mutex;
+    static bool r_protected;
 };
 
 template <typename ReturnType>
@@ -353,6 +357,117 @@ void DBConnector::hmset(const std::string &key, InputIterator start, InputIterat
     shset.formatHSET(key, start, stop);
     RedisReply r(this, shset, REDIS_REPLY_INTEGER);
 }
+
+// class ProtectedDBConnector : public DBConnector{
+//     private:
+//         std::mutex mtx;
+//     public:
+//     explicit ProtectedDBConnector(const ProtectedDBConnector &other);
+//     ProtectedDBConnector(int dbId, const RedisContext &ctx) : DBConnector(dbId, ctx) {}
+//     ProtectedDBConnector(int dbId, const std::string &hostname, int port, unsigned int timeout): DBConnector(dbId, hostname, port, timeout) {}
+//     ProtectedDBConnector(int dbId, const std::string &unixPath, unsigned int timeout): DBConnector(dbId, unixPath, timeout) {}
+//     ProtectedDBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn = false): DBConnector(dbName, timeout, isTcpConn) {}
+//     ProtectedDBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn, const std::string &netns): DBConnector(dbName, timeout, isTcpConn, netns) {}
+//     ProtectedDBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn, const SonicDBKey &key): DBConnector(dbName, timeout, isTcpConn, key) {}
+//     // You can define constructors for the new class that call the base class constructors
+//     // ProtectedDBConnector(int dbId, const std::string& hostname, int port, unsigned int timeout)
+//     //     : DBConnector(dbId, hostname, port, timeout) {}
+
+//     // ProtectedDBConnector(int dbId, const std::string& unixPath, unsigned int timeout)
+//     //     : DBConnector(dbId, unixPath, timeout) {}
+
+//     // ProtectedDBConnector(const std::string& dbName, unsigned int timeout, bool isTcpConn, const SonicDBKey &key)
+//     //     : DBConnector(dbName, timeout, isTcpConn, key) {}
+
+// #if defined(SWIG) && defined(SWIGPYTHON)
+//     // SWIG interface file (.i) globally rename map C++ `del` to python `delete`,
+//     // but applications already followed the old behavior of auto renamed `_del`.
+//     // So we implemented old behavior for backward compatibility
+//     // TODO: remove this function after applications use the function name `delete`
+//     %pythoncode %{
+//         def _del(self, *args, **kwargs):
+//             return self.delete(*args, **kwargs)
+//     %}
+// #endif
+//         bool exists(const std::string &key);
+
+//     int64_t hdel(const std::string &key, const std::string &field);
+
+//     int64_t hdel(const std::string &key, const std::vector<std::string> &fields);
+
+//     void del(const std::vector<std::string>& keys);
+//     int64_t del(const std::string &key);
+
+//     template <typename ReturnType=std::unordered_map<std::string, std::string>>
+//     ReturnType hgetall(const std::string &key);
+
+// #ifndef SWIG
+//     template <typename OutputIterator>
+//     void hgetall(const std::string &key, OutputIterator result);
+// #endif
+//     std::map<std::string, std::map<std::string, std::map<std::string, std::string>>> getall();
+
+//     std::vector<std::string> keys(const std::string &key);
+
+//     std::pair<int, std::vector<std::string>> scan(int cursor = 0, const char *match = "", uint32_t count = 10);
+
+//     bool set(const std::string &key, const std::string &value);
+//     bool set(const std::string &key, int value);
+
+//     void hset(const std::string &key, const std::string &field, const std::string &value);
+
+//     template<typename InputIterator>
+//     void hmset(const std::string &key, InputIterator start, InputIterator stop);
+
+//     void hmset(const std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>& multiHash);
+
+//     std::shared_ptr<std::string> get(const std::string &key);
+
+//     std::shared_ptr<std::string> hget(const std::string &key, const std::string &field);
+
+//     bool hexists(const std::string &key, const std::string &field);
+
+//     int64_t incr(const std::string &key);
+
+//     int64_t decr(const std::string &key);
+
+//     int64_t rpush(const std::string &list, const std::string &item);
+
+//     std::shared_ptr<std::string> blpop(const std::string &list, int timeout);
+
+//     void subscribe(const std::string &pattern);
+
+//     void psubscribe(const std::string &pattern);
+
+//     void punsubscribe(const std::string &pattern);
+
+//     int64_t publish(const std::string &channel, const std::string &message);
+
+//     void config_set(const std::string &key, const std::string &value);
+
+//     bool flushdb();
+   
+
+// };
+
+// template <typename ReturnType>
+// ReturnType ProtectedDBConnector::hgetall(const std::string &key)
+// {
+//     ReturnType map;
+//     std::unique_lock<std::mutex> lock(mtx);
+//     hgetall(key, std::inserter(map, map.end()));
+//     return map;
+// }
+
+// #ifndef SWIG
+// template<typename OutputIterator>
+// void ProtectedDBConnector::hgetall(const std::string &key, OutputIterator result)
+// {
+//     DBConnector::hgetall(key, result);
+// }
+// #endif
+
+
 
 }
 #endif
