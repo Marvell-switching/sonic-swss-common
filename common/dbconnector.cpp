@@ -18,8 +18,7 @@ using json = nlohmann::json;
 using namespace std;
 using namespace swss;
 
-std::mutex DBConnector::r_mutex;  // Define static mutex
-bool DBConnector::r_protected = false; // Define static protected flag
+std::mutex RedisContext::r_mutex;  // Define static mutex
 
 #define R_SAFE() \
     std::unique_lock<std::mutex> lock(r_mutex, std::defer_lock); \
@@ -27,6 +26,13 @@ bool DBConnector::r_protected = false; // Define static protected flag
     { \
         lock.lock(); \
     } 
+
+#define PRINT_DB(_ID) \
+    SWSS_LOG_DEBUG("DBConnector%d: DBid %d name %s protected %d", _ID, m_dbId, m_dbName.c_str(), r_protected);
+    
+
+
+
 
 void SonicDBConfig::parseDatabaseConfig(const string &file,
                     std::map<std::string, RedisInstInfo> &inst_entry,
@@ -545,9 +551,9 @@ RedisContext::RedisContext()
 }
 
 RedisContext::RedisContext(const RedisContext &other, bool isProtected)
-    : r_protected(isProtected)
 {
     auto octx = other.getContext();
+    r_protected = isProtected;
     const char *unixPath = octx->unix_sock.path;
     if (unixPath)
     {
@@ -559,8 +565,9 @@ RedisContext::RedisContext(const RedisContext &other, bool isProtected)
     }
 }
 
-void RedisContext::initContext(const char *host, int port, const timeval *tv)
+void RedisContext::initContext(const char *host, int port, const timeval *tv, bool isProtected)
 {
+    r_protected = isProtected;
     if (tv)
     {
         m_conn = redisConnectWithTimeout(host, port, *tv);
@@ -575,8 +582,9 @@ void RedisContext::initContext(const char *host, int port, const timeval *tv)
                            "Unable to connect to redis");
 }
 
-void RedisContext::initContext(const char *path, const timeval *tv)
+void RedisContext::initContext(const char *path, const timeval *tv, bool isProtected)
 {
+    r_protected = isProtected;
     if (tv)
     {
         m_conn = redisConnectUnixWithTimeout(path, *tv);
@@ -630,11 +638,20 @@ string RedisContext::getClientName()
     }
 }
 
-void DBConnector::select(DBConnector *db)
+void DBConnector::select(DBConnector *db, bool isProtected)
 {
     string select("SELECT ");
     select += to_string(db->getDbId());
-    R_SAFE();
+    std::unique_lock<std::mutex> lock(r_mutex, std::defer_lock);
+    if ( isProtected ) 
+    { 
+        SWSS_LOG_WARN("is r_protected");
+        lock.lock(); 
+    } 
+    else 
+    { 
+        SWSS_LOG_WARN("is not r_protected"); 
+    }
     RedisReply r(db, select, REDIS_REPLY_STATUS);
     r.checkStatusOK();
 }
@@ -645,7 +662,10 @@ DBConnector::DBConnector(const DBConnector &other)
     , m_dbName(other.m_dbName)
     , m_key(other.m_key)
 {
-    select(this);
+    r_protected = other.r_protected;
+    // SWSS_LOG_WARN("DBConnector1 r_protected %d", r_protected);
+    PRINT_DB(1);
+    select(this, r_protected);
 }
 
 DBConnector::DBConnector(int dbId, const RedisContext& ctx, bool isProtected)
@@ -653,7 +673,9 @@ DBConnector::DBConnector(int dbId, const RedisContext& ctx, bool isProtected)
     , m_dbId(dbId)
 {
     r_protected = isProtected;
-    select(this);
+    // SWSS_LOG_WARN("DBConnector2 r_protected %d", r_protected);
+    PRINT_DB(2);
+    select(this, r_protected);
 }
 
 DBConnector::DBConnector(int dbId, const string& hostname, int port,
@@ -663,8 +685,9 @@ DBConnector::DBConnector(int dbId, const string& hostname, int port,
     struct timeval tv = {0, (suseconds_t)timeout * 1000};
     struct timeval *ptv = timeout ? &tv : NULL;
     initContext(hostname.c_str(), port, ptv);
-
-    select(this);
+    // SWSS_LOG_WARN("DBConnector3 r_protected %d", r_protected);
+    PRINT_DB(3);
+    select(this, r_protected);
 }
 
 DBConnector::DBConnector(int dbId, const string& unixPath, unsigned int timeout)
@@ -673,37 +696,54 @@ DBConnector::DBConnector(int dbId, const string& unixPath, unsigned int timeout)
     struct timeval tv = {0, (suseconds_t)timeout * 1000};
     struct timeval *ptv = timeout ? &tv : NULL;
     initContext(unixPath.c_str(), ptv);
+    // SWSS_LOG_WARN("DBConnector4 r_protected %d dbID %d", r_protected, dbId);
+    PRINT_DB(4);
 
-    select(this);
+    select(this, r_protected);
 }
 
 DBConnector::DBConnector(const string& dbName, unsigned int timeout, bool isTcpConn, const string& netns)
     : DBConnector(dbName, timeout, isTcpConn, SonicDBKey(netns))
 {
+    PRINT_DB(5);
 }
 
-DBConnector::DBConnector(const string& dbName, unsigned int timeout, bool isTcpConn, const SonicDBKey &key)
+DBConnector::DBConnector(const string& dbName, unsigned int timeout, bool isTcpConn, const SonicDBKey &key, bool isProtected)
     : m_dbId(SonicDBConfig::getDbId(dbName, key))
     , m_dbName(dbName)
     , m_key(key)
 {
+    r_protected = isProtected;
+    // SWSS_LOG_WARN("DBConnector5 r_protected %d db %s", r_protected, dbName.c_str());
     struct timeval tv = {0, (suseconds_t)timeout * 1000};
     struct timeval *ptv = timeout ? &tv : NULL;
     if (isTcpConn)
     {
-        initContext(SonicDBConfig::getDbHostname(dbName, m_key).c_str(), SonicDBConfig::getDbPort(dbName, m_key), ptv);
+        initContext(SonicDBConfig::getDbHostname(dbName, m_key).c_str(), SonicDBConfig::getDbPort(dbName, m_key), ptv, isProtected);
     }
     else
     {
-        initContext(SonicDBConfig::getDbSock(dbName, m_key).c_str(), ptv);
+        initContext(SonicDBConfig::getDbSock(dbName, m_key).c_str(), ptv, isProtected);
     }
-
-    select(this);
+    PRINT_DB(6);
+    select(this, r_protected);
 }
 
 DBConnector::DBConnector(const string& dbName, unsigned int timeout, bool isTcpConn)
     : DBConnector(dbName, timeout, isTcpConn, SonicDBKey())
 {
+    // SWSS_LOG_WARN("DBConnector7 r_protected %d db %s", r_protected, dbName.c_str());
+    PRINT_DB(7);
+    // r_protected = isProtected;
+    // Empty constructor
+}
+
+DBConnector::DBConnector(const string& dbName, unsigned int timeout, bool isTcpConn, bool isProtected)
+    : DBConnector(dbName, timeout, isTcpConn, SonicDBKey(), isProtected)
+{
+    r_protected = isProtected;
+    // SWSS_LOG_WARN("DBConnector6 r_protected %d db %s", r_protected, dbName.c_str());
+    PRINT_DB(8);
     // Empty constructor
 }
 

@@ -191,14 +191,14 @@ public:
 
 protected:
     RedisContext();
-    void initContext(const char *host, int port, const timeval *tv);
-    void initContext(const char *path, const timeval *tv);
+    void initContext(const char *host, int port, const timeval *tv, bool isProtected = false);
+    void initContext(const char *path, const timeval *tv, bool isProtected = false);
     void setContext(redisContext *ctx);
+    static std::mutex r_mutex;
+    bool r_protected;
 
 private:
     redisContext *m_conn;
-    bool r_protected = false;
-    std::mutex r_mutex;
 };
 
 class DBConnector : public RedisContext
@@ -218,8 +218,9 @@ public:
     DBConnector(int dbId, const std::string &hostname, int port, unsigned int timeout);
     DBConnector(int dbId, const std::string &unixPath, unsigned int timeout);
     DBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn = false);
+    DBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn, bool isProtected);
     DBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn, const std::string &netns);
-    DBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn, const SonicDBKey &key);
+    DBConnector(const std::string &dbName, unsigned int timeout, bool isTcpConn, const SonicDBKey &key, bool isProtected = false);
     DBConnector& operator=(const DBConnector&) = delete;
 
     int getDbId() const;
@@ -233,7 +234,7 @@ public:
 #endif
     SonicDBKey getDBKey() const;
 
-    static void select(DBConnector *db);
+    static void select(DBConnector *db, bool isProtected);
 
     /* Create new context to DB */
     DBConnector *newConnector(unsigned int timeout) const;
@@ -320,8 +321,6 @@ private:
     int m_dbId;
     std::string m_dbName;
     SonicDBKey m_key;
-    static std::mutex r_mutex;
-    static bool r_protected;
 };
 
 template <typename ReturnType>
