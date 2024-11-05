@@ -179,6 +179,9 @@ namespace swss {
 
 #define APP_PAC_PORT_TABLE_NAME               "PAC_PORT_TABLE"
 
+#define APP_ARS_PROFILE_TABLE_NAME            "ARS_PROFILE_TABLE"
+#define APP_ARS_MIN_PATH_INTERFACE_TABLE_NAME "ARS_MIN_PATH_TABLE"
+
 /***** TO BE REMOVED *****/
 
 #define APP_TC_TO_QUEUE_MAP_TABLE_NAME  "TC_TO_QUEUE_MAP_TABLE"
@@ -431,6 +434,11 @@ namespace swss {
 
 #define CFG_COPP_TRAP_TABLE_NAME                    "COPP_TRAP"
 #define CFG_COPP_GROUP_TABLE_NAME                   "COPP_GROUP"
+
+#define CFG_ARS_PROFILE                             "ARS_PROFILE"
+#define CFG_ARS_MIN_PATH_INTERFACE                  "ARS_MIN_PATH"
+#define CFG_ARS_NHG_PREFIX                          "ARS_NHG_PREFIX"
+#define CFG_ARS_NHG_MEMBER                          "ARS_NHG_MEMBER"
 
 #define CFG_FG_NHG                                  "FG_NHG"
 #define CFG_FG_NHG_PREFIX                           "FG_NHG_PREFIX"
