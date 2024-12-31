@@ -91,7 +91,12 @@
             "id" : 14,
             "separator": ":",
             "instance" : "redis"
-        }
+        },
+	"DYNAMIC_DB" : {
+	    "id" : 21,
+	    "separator": "|",
+	    "instance" : "redis"
+	}
     },
     "VERSION" : "1.0"
 }
