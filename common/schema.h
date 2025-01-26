@@ -29,6 +29,7 @@ namespace swss {
 #define DPU_COUNTERS_DB     18
 #define EVENT_DB            19
 #define BMP_STATE_DB        20
+#define DYNAMIC_DB          21
 
 /***** APPLICATION DATABASE *****/
 
