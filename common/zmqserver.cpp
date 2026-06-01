@@ -12,44 +12,178 @@ using namespace std;
 
 namespace swss {
 
+void ZmqHandlerRegistry::registerHandler(
+    const std::string& dbName,
+    const std::string& tableName,
+    ZmqMessageHandler* handler)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto dbResult = m_handlers.insert(make_pair(dbName, map<string, ZmqMessageHandler*>()));
+    if (dbResult.second) {
+        SWSS_LOG_DEBUG("ZmqHandlerRegistry add mapping for db: %s", dbName.c_str());
+    }
+
+    auto tableResult = dbResult.first->second.insert(make_pair(tableName, handler));
+    if (tableResult.second) {
+        SWSS_LOG_DEBUG("ZmqHandlerRegistry register handler for db: %s, table: %s",
+                       dbName.c_str(), tableName.c_str());
+    }
+}
+
+void ZmqHandlerRegistry::removeHandler(
+    const std::string& dbName,
+    const std::string& tableName)
+{
+    // Take the same mutex that dispatch() holds across the callback. Once we
+    // acquire it, no callback into this (dbName, tableName) handler is in
+    // flight and no further one can start — making it safe for the caller to
+    // destroy the handler object after removeHandler() returns.
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto dbIter = m_handlers.find(dbName);
+    if (dbIter == m_handlers.end()) {
+        return;
+    }
+
+    dbIter->second.erase(tableName);
+    if (dbIter->second.empty()) {
+        m_handlers.erase(dbIter);
+    }
+
+    SWSS_LOG_DEBUG("ZmqHandlerRegistry removed handler for db: %s, table: %s",
+                   dbName.c_str(), tableName.c_str());
+}
+
+void ZmqHandlerRegistry::dispatch(
+    const std::string& dbName,
+    const std::string& tableName,
+    const std::vector<std::shared_ptr<KeyOpFieldsValuesTuple>>& kcos)
+{
+    // Hold the mutex for the duration of the callback. Concurrent
+    // removeHandler() on this (dbName, tableName) blocks until we return,
+    // so the handler cannot be destroyed mid-call.
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    auto dbIter = m_handlers.find(dbName);
+    if (dbIter == m_handlers.end()) {
+        SWSS_LOG_DEBUG("ZmqHandlerRegistry can't find any handler for db: %s", dbName.c_str());
+        return;
+    }
+
+    auto tableIter = dbIter->second.find(tableName);
+    if (tableIter == dbIter->second.end()) {
+        SWSS_LOG_DEBUG("ZmqHandlerRegistry can't find handler for db: %s, table: %s",
+                       dbName.c_str(), tableName.c_str());
+        return;
+    }
+
+    tableIter->second->handleReceivedData(kcos);
+}
+
 ZmqServer::ZmqServer(const std::string& endpoint)
-    : ZmqServer(endpoint, "")
+    : ZmqServer(endpoint, "", false, false)
 {
 }
 
 ZmqServer::ZmqServer(const std::string& endpoint, const std::string& vrf)
-    : m_endpoint(endpoint),
-    m_vrf(vrf)
+    : ZmqServer(endpoint, vrf, false, false)
 {
-    connect();
-    m_buffer.resize(MQ_RESPONSE_MAX_COUNT);
-    m_runThread = true;
-    m_mqPollThread = std::make_shared<std::thread>(&ZmqServer::mqPollThread, this);
+}
+
+ZmqServer::ZmqServer(const std::string& endpoint, const std::string& vrf, bool lazyBind)
+    : ZmqServer(endpoint, vrf, lazyBind, false)
+{
+}
+
+ZmqServer::ZmqServer(const std::string& endpoint, const std::string& vrf, bool lazyBind, bool oneToOneSync)
+    : m_mqPollThread(nullptr),
+    m_endpoint(endpoint),
+    m_vrf(vrf),
+    m_context(nullptr),
+    m_socket(nullptr),
+    m_oneToOneSync(oneToOneSync),
+    m_allowZmqPoll(true),
+    m_registry(std::make_shared<ZmqHandlerRegistry>())
+{
+    if (!lazyBind)
+    {
+        bind();
+    }
 
     SWSS_LOG_DEBUG("ZmqServer ctor endpoint: %s", endpoint.c_str());
 }
 
 ZmqServer::~ZmqServer()
 {
+    m_allowZmqPoll = true;
     m_runThread = false;
-    m_mqPollThread->join();
+    if (m_mqPollThread)
+    {
+        m_mqPollThread->join();
+    }
 
-    zmq_close(m_socket);
-    zmq_ctx_destroy(m_context);
+    if (m_socket)
+    {
+        zmq_close(m_socket);
+    }
+
+    if (m_context)
+    {
+        zmq_ctx_destroy(m_context);
+    }
+
+    // m_registry's refcount drops here. If any registered handler still holds
+    // a reference, the registry survives until that handler is destroyed; its
+    // destructor will call removeHandler() safely against the surviving
+    // registry without touching this (now-gone) ZmqServer.
 }
 
-void ZmqServer::connect()
+void ZmqServer::bind()
 {
     SWSS_LOG_ENTER();
-    m_context = zmq_ctx_new();
-    m_socket = zmq_socket(m_context, ZMQ_PULL);
+    if (m_socket)
+    {
+        SWSS_LOG_THROW("ZmqServer has already been bound to the endpoint: %s", m_endpoint.c_str());
+    }
 
-    // Increase recv buffer for use all bandwidth:  http://api.zeromq.org/4-2:zmq-setsockopt
-    int high_watermark = MQ_WATERMARK;
-    zmq_setsockopt(m_socket, ZMQ_RCVHWM, &high_watermark, sizeof(high_watermark));
+    m_context = zmq_ctx_new();
+
+    if(m_oneToOneSync)
+    {
+        m_socket = zmq_socket(m_context, ZMQ_REP);
+    }
+    else
+    {
+        m_socket = zmq_socket(m_context, ZMQ_PULL);
+    }
+
+    if (!m_oneToOneSync)
+    {
+        // Increase recv buffer for use all bandwidth:  http://api.zeromq.org/4-2:zmq-setsockopt
+        int high_watermark = MQ_WATERMARK;
+        zmq_setsockopt(m_socket, ZMQ_RCVHWM, &high_watermark, sizeof(high_watermark));
+
+        /*
+         * Enable TCP keepalive on the server socket as defense-in-depth.
+         * This allows the server to detect and clean up stale client connections.
+         */
+        int keepalive = 1;
+        zmq_setsockopt(m_socket, ZMQ_TCP_KEEPALIVE, &keepalive, sizeof(keepalive));
+
+        int keepalive_idle = 5;
+        zmq_setsockopt(m_socket, ZMQ_TCP_KEEPALIVE_IDLE, &keepalive_idle, sizeof(keepalive_idle));
+
+        int keepalive_intvl = 1;
+        zmq_setsockopt(m_socket, ZMQ_TCP_KEEPALIVE_INTVL, &keepalive_intvl, sizeof(keepalive_intvl));
+
+        int keepalive_cnt = 5;
+        zmq_setsockopt(m_socket, ZMQ_TCP_KEEPALIVE_CNT, &keepalive_cnt, sizeof(keepalive_cnt));
+
+    }
 
     if (!m_vrf.empty())
-    {   
+    {
         zmq_setsockopt(m_socket, ZMQ_BINDTODEVICE, m_vrf.c_str(), m_vrf.length());
     }
 
@@ -60,6 +194,10 @@ void ZmqServer::connect()
             m_endpoint.c_str(),
             zmq_errno());
     }
+
+    SWSS_LOG_DEBUG("ZmqServer bind to endpoint: %s", m_endpoint.c_str());
+
+    startMqPollThread();
 }
 
 void ZmqServer::registerMessageHandler(
@@ -67,34 +205,24 @@ void ZmqServer::registerMessageHandler(
                                     const std::string tableName,
                                     ZmqMessageHandler* handler)
 {
-    auto dbResult = m_HandlerMap.insert(pair<string, map<string, ZmqMessageHandler*>>(dbName, map<string, ZmqMessageHandler*>()));
-    if (dbResult.second) {
-        SWSS_LOG_DEBUG("ZmqServer add handler mapping for db: %s", dbName.c_str());
-    }
+    m_registry->registerHandler(dbName, tableName, handler);
+}
 
-    auto tableResult = dbResult.first->second.insert(pair<string, ZmqMessageHandler*>(tableName, handler));
-    if (tableResult.second) {
-        SWSS_LOG_DEBUG("ZmqServer register handler for db: %s, table: %s", dbName.c_str(), tableName.c_str());
-    }
+void ZmqServer::removeMessageHandler(
+                                    const std::string& dbName,
+                                    const std::string& tableName)
+{
+    m_registry->removeHandler(dbName, tableName);
 }
 
 ZmqMessageHandler* ZmqServer::findMessageHandler(
-                                                const std::string dbName,
-                                                const std::string tableName)
+    const std::string /*dbName*/,
+    const std::string /*tableName*/)
 {
-    auto dbMappingIter = m_HandlerMap.find(dbName);
-    if (dbMappingIter == m_HandlerMap.end()) {
-        SWSS_LOG_DEBUG("ZmqServer can't find any handler for db: %s", dbName.c_str());
-        return nullptr;
-    }
-
-    auto tableMappingIter = dbMappingIter->second.find(tableName);
-    if (tableMappingIter == dbMappingIter->second.end()) {
-        SWSS_LOG_DEBUG("ZmqServer can't find handler for db: %s, table: %s", dbName.c_str(), tableName.c_str());
-        return nullptr;
-    }
-
-    return tableMappingIter->second;
+    // Retained as a no-op for source compatibility with external test mocks
+    // that override this symbol at link time. Real dispatch lives in
+    // ZmqHandlerRegistry::dispatch().
+    return nullptr;
 }
 
 void ZmqServer::handleReceivedData(const char* buffer, const size_t size)
@@ -104,14 +232,14 @@ void ZmqServer::handleReceivedData(const char* buffer, const size_t size)
     std::vector<std::shared_ptr<KeyOpFieldsValuesTuple>> kcos;
     BinarySerializer::deserializeBuffer(buffer, size, dbName, tableName, kcos);
 
-    // find handler
-    auto handler = findMessageHandler(dbName, tableName);
-    if (handler == nullptr) {
-        SWSS_LOG_WARN("ZmqServer can't find handler for received message: %s", buffer);
-        return;
-    }
+    m_registry->dispatch(dbName, tableName, kcos);
+}
 
-    handler->handleReceivedData(kcos);
+void ZmqServer::startMqPollThread()
+{
+    m_buffer.resize(MQ_RESPONSE_MAX_COUNT);
+    m_runThread = true;
+    m_mqPollThread = std::make_shared<std::thread>(&ZmqServer::mqPollThread, this);
 }
 
 void ZmqServer::mqPollThread()
@@ -129,6 +257,8 @@ void ZmqServer::mqPollThread()
     SWSS_LOG_NOTICE("bind to zmq endpoint: %s", m_endpoint.c_str());
     while (m_runThread)
     {
+        m_allowZmqPoll = false;
+
         // receive message
         auto rc = zmq_poll(&poll_item, 1, 1000);
         if (rc == 0 || !(poll_item.revents & ZMQ_POLLIN))
@@ -139,7 +269,15 @@ void ZmqServer::mqPollThread()
         }
 
         // receive message
-        rc = zmq_recv(m_socket, m_buffer.data(), MQ_RESPONSE_MAX_COUNT, ZMQ_DONTWAIT);
+        if (m_oneToOneSync)
+        {
+            rc = zmq_recv(m_socket, m_buffer.data(), MQ_RESPONSE_MAX_COUNT, 0);
+        }
+        else
+        {
+            rc = zmq_recv(m_socket, m_buffer.data(), MQ_RESPONSE_MAX_COUNT, ZMQ_DONTWAIT);
+        }
+
         if (rc < 0)
         {
             int zmq_err = zmq_errno();
@@ -166,15 +304,79 @@ void ZmqServer::mqPollThread()
 
         // deserialize and write to redis:
         handleReceivedData(m_buffer.data(), rc);
+        while (m_oneToOneSync && !m_allowZmqPoll) {
+          usleep(10);
+        }
     }
     SWSS_LOG_NOTICE("mqPollThread end");
 }
 
-// TODO: To be implemented later, required for ZMQ_CLIENT & ZMQ_SERVER
-// socket types in response path.
 void ZmqServer::sendMsg(
     const std::string &dbName, const std::string &tableName,
-    const std::vector<swss::KeyOpFieldsValuesTuple> &values) {
-  return;
+    const std::vector<swss::KeyOpFieldsValuesTuple> &values)
+{
+  if (!m_oneToOneSync) {
+    return;
+  }
+
+  int serializedlen = (int)BinarySerializer::serializeBuffer(
+      m_buffer.data(), m_buffer.size(), dbName, tableName, values);
+
+  SWSS_LOG_DEBUG("sending: %d", serializedlen);
+  int zmq_err = 0;
+  int retry_delay = 10;
+  int rc = 0;
+  for (int i = 0; i <= MQ_MAX_RETRY; ++i) {
+    rc = zmq_send(m_socket, m_buffer.data(), serializedlen, 0);
+
+    if (rc >= 0) {
+      m_allowZmqPoll = true;
+      SWSS_LOG_DEBUG("zmq sent %d bytes", serializedlen);
+      return;
+    }
+
+    zmq_err = zmq_errno();
+    // sleep (2 ^ retry time) * 10 ms
+    retry_delay *= 2;
+    if (zmq_err == EINTR || zmq_err == EFSM) {
+      // EINTR: interrupted by signal
+      // EFSM: socket state not ready
+      //       For example when ZMQ socket still not receive reply message from
+      //       last sended package. There was state machine inside ZMQ socket,
+      //       when the socket is not in ready to send state, this error will
+      //       happen.
+      // for more detail, please check: http://api.zeromq.org/2-1:zmq-send
+      SWSS_LOG_DEBUG("zmq send retry, endpoint: %s, error: %d",
+                     m_endpoint.c_str(), zmq_err);
+
+      retry_delay = 0;
+    } else if (zmq_err == EAGAIN) {
+      // EAGAIN: ZMQ is full to need try again
+      SWSS_LOG_WARN("zmq is full, will retry in %d ms, endpoint: %s, error: %d",
+                    retry_delay, m_endpoint.c_str(), zmq_err);
+    } else if (zmq_err == ETERM) {
+      auto message = "zmq connection break, endpoint: " + m_endpoint +
+                     ", error: " + to_string(rc);
+      SWSS_LOG_ERROR("%s", message.c_str());
+      throw system_error(make_error_code(errc::connection_reset), message);
+    } else {
+      // for other error, send failed immediately.
+      auto message = "zmq send failed, endpoint: " + m_endpoint +
+                     ", error: " + to_string(rc);
+      SWSS_LOG_ERROR("%s", message.c_str());
+      throw system_error(make_error_code(errc::io_error), message);
+    }
+
+    usleep(retry_delay * 1000);
+  }
+
+  // failed after retry
+  auto message = "zmq send failed, endpoint: " + m_endpoint +
+                 ", zmqerrno: " + to_string(zmq_err) + ":" +
+                 zmq_strerror(zmq_err) +
+                 ", msg length:" + to_string(serializedlen);
+  SWSS_LOG_ERROR("%s", message.c_str());
+  throw system_error(make_error_code(errc::io_error), message);
 }
+
 }

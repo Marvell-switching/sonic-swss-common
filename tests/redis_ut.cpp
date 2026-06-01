@@ -3,8 +3,8 @@
 #include <thread>
 #include <algorithm>
 #include <deque>
-#include <gmock/gmock.h>
 #include <system_error>
+#include <gmock/gmock.h>
 #include "gtest/gtest.h"
 #include "common/dbconnector.h"
 #include "common/producertable.h"
@@ -12,6 +12,7 @@
 #include "common/notificationconsumer.h"
 #include "common/notificationproducer.h"
 #include "common/redisclient.h"
+#include "common/redisreply.h"
 #include "common/select.h"
 #include "common/selectableevent.h"
 #include "common/selectabletimer.h"
@@ -531,6 +532,33 @@ TEST(DBConnector, HmsetAndDel)
     {
         auto fvs = db.hgetall(key);
         EXPECT_EQ(fvs.size(), 0);
+    }
+}
+
+TEST(DBConnector, DelMultipleKeys)
+{
+    DBConnector db("TEST_DB", 0, true);
+    clearDB();
+
+    vector<size_t> num_keys = {1, 128, 300};
+    vector<string> keys;
+    for (size_t i = 0; i < num_keys.size(); ++i)
+    {
+        size_t num_key = num_keys[i];
+        if (i > 0)
+        {
+            keys.clear();
+        }
+        for (size_t j = 0; j < num_key; ++j)
+        {
+            string key = "hash_key_" + to_string(j);
+            db.set(key, "value");
+            keys.push_back(key);
+        }
+        EXPECT_EQ(db.keys("*").size(), num_key);
+
+        db.del(keys);
+        EXPECT_EQ(db.keys("*").size(), 0);
     }
 }
 
@@ -1167,6 +1195,35 @@ TEST(Connector, connectFail)
         catch(const std::system_error& e)
         {
             EXPECT_THAT(e.what(), HasSubstr("Unable to connect to redis (unix-socket) - "));
+            throw;
+        }
+    }, std::system_error);
+}
+
+TEST(Redisreply, guard)
+{
+    // Improve test coverage for guard() method.
+    string command = "test";
+    EXPECT_THROW({
+        try
+        {
+            guard([&]{throw system_error(make_error_code(errc::io_error), "LOADING Redis is loading the dataset in memory");}, command.c_str());
+        }
+        catch(const std::system_error& e)
+        {
+            EXPECT_THAT(e.what(), HasSubstr("LOADING Redis is loading the dataset in memory"));
+            throw;
+        }
+    }, std::system_error);
+
+    EXPECT_THROW({
+        try
+        {
+            guard([&]{throw system_error(make_error_code(errc::io_error), "Command failed");}, command.c_str());
+        }
+        catch(const std::system_error& e)
+        {
+            EXPECT_THAT(e.what(), HasSubstr("Command failed"));
             throw;
         }
     }, std::system_error);

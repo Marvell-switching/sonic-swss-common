@@ -2,6 +2,7 @@
 
 #include <string>
 #include <deque>
+#include <list>
 #include <condition_variable>
 #include "asyncdbupdater.h"
 #include "consumertablebase.h"
@@ -19,6 +20,8 @@ public:
     static constexpr int DEFAULT_POP_BATCH_SIZE = 128;
 
     ZmqConsumerStateTable(DBConnector *db, const std::string &tableName, ZmqServer &zmqServer, int popBatchSize = DEFAULT_POP_BATCH_SIZE, int pri = 0, bool dbPersistence = false);
+
+    ~ZmqConsumerStateTable() override;
 
     /* Get multiple pop elements */
     void pops(std::deque<KeyOpFieldsValuesTuple> &vkco, const std::string &prefix = EMPTY_PREFIX);
@@ -74,15 +77,23 @@ private:
 
     std::mutex m_receivedQueueMutex;
 
-    std::queue<std::shared_ptr<KeyOpFieldsValuesTuple>> m_receivedOperationQueue;
+    std::queue<std::shared_ptr<KeyOpFieldsValuesTuple>, std::list<std::shared_ptr<KeyOpFieldsValuesTuple>>> m_receivedOperationQueue;
 
     swss::SelectableEvent m_selectableEvent;
 
     DBConnector *m_db;
 
-    ZmqServer& m_zmqServer;
+    // Cached at construction time so the destructor can call
+    // m_handlerRegistry->removeHandler() without dereferencing m_db.
+    std::string m_dbName;
+
+    // Co-owned with the ZmqServer that created us. Lets the destructor
+    // unregister cleanly even if the ZmqServer has already been destroyed.
+    std::shared_ptr<ZmqHandlerRegistry> m_handlerRegistry;
 
     std::unique_ptr<AsyncDBUpdater> m_asyncDBUpdater;
+
+    size_t m_popBatchSize;
 };
 
 }

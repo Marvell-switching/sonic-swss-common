@@ -21,8 +21,19 @@ ZmqConsumerStateTable::ZmqConsumerStateTable(DBConnector *db, const std::string 
     : Selectable(pri)
     , TableBase(tableName, TableBase::getTableSeparator(db->getDbId()))
     , m_db(db)
-    , m_zmqServer(zmqServer)
+    , m_dbName(db->getDbName())
+    , m_handlerRegistry(zmqServer.getHandlerRegistry())
 {
+    if (popBatchSize > 0)
+    {
+        m_popBatchSize = (size_t)popBatchSize;
+    }
+    else
+    {
+        m_popBatchSize = DEFAULT_POP_BATCH_SIZE;
+        SWSS_LOG_ERROR("Invalid pop batch size: Setting it to %d", DEFAULT_POP_BATCH_SIZE);
+    }
+
     if (dbPersistence)
     {
         SWSS_LOG_DEBUG("Database persistence enabled, tableName: %s", tableName.c_str());
@@ -34,9 +45,20 @@ ZmqConsumerStateTable::ZmqConsumerStateTable(DBConnector *db, const std::string 
         m_asyncDBUpdater = nullptr;
     }
 
-    m_zmqServer.registerMessageHandler(m_db->getDbName(), tableName, this);
+    m_handlerRegistry->registerHandler(m_dbName, tableName, this);
 
     SWSS_LOG_DEBUG("ZmqConsumerStateTable ctor tableName: %s", tableName.c_str());
+}
+
+ZmqConsumerStateTable::~ZmqConsumerStateTable()
+{
+    // Detach from the registry before any of our members (notably the
+    // SelectableEvent, whose eventfd we'd write to from handleReceivedData)
+    // are destroyed. removeHandler() blocks until any in-flight dispatch
+    // into us returns. The registry is co-owned with the ZmqServer that
+    // created us, so this is safe even if that ZmqServer has already been
+    // destroyed — only the shared registry is touched.
+    m_handlerRegistry->removeHandler(m_dbName, getTableName());
 }
 
 void ZmqConsumerStateTable::handleReceivedData(const std::vector<std::shared_ptr<KeyOpFieldsValuesTuple>> &kcos)
@@ -80,7 +102,8 @@ void ZmqConsumerStateTable::pops(std::deque<KeyOpFieldsValuesTuple> &vkco, const
     }
 
     vkco.clear();
-    for (size_t ie = 0; ie < count; ie++)
+    auto pop_limit = min(count, m_popBatchSize);
+    for (size_t ie = 0; ie < pop_limit; ie++)
     {
         auto& kco = *(m_receivedOperationQueue.front());
         vkco.push_back(std::move(kco));
@@ -89,6 +112,12 @@ void ZmqConsumerStateTable::pops(std::deque<KeyOpFieldsValuesTuple> &vkco, const
             std::lock_guard<std::mutex> lock(m_receivedQueueMutex);
             m_receivedOperationQueue.pop();
         }
+    }
+
+    if (count > m_popBatchSize)
+    {
+        // Notify epoll to wake up and continue to pop.
+        m_selectableEvent.notify();
     }
 }
 
